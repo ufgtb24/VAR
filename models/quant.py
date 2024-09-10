@@ -154,15 +154,15 @@ class VectorQuantizer2(nn.Module):
             else:
                 d_no_grad = torch.sum(z_NC.square(), dim=1, keepdim=True) + torch.sum(self.embedding.weight.data.square(), dim=1, keepdim=False)
                 d_no_grad.addmm_(z_NC, self.embedding.weight.data.T, alpha=-2, beta=1)  # (B*h*w, vocab_size)
-                idx_N = torch.argmin(d_no_grad, dim=1)
+                idx_N = torch.argmin(d_no_grad, dim=1) # 用来做 LLM 的输入， 当前scale编码的 idx
             
             idx_Bhw = idx_N.view(B, ph, pw)
             h_BChw = F.interpolate(self.embedding(idx_Bhw).permute(0, 3, 1, 2), size=(H, W), mode='bicubic').contiguous() if (si != SN-1) else self.embedding(idx_Bhw).permute(0, 3, 1, 2).contiguous()
-            h_BChw = self.quant_resi[si/(SN-1)](h_BChw)
-            f_hat.add_(h_BChw)
-            f_rest.sub_(h_BChw)
+            h_BChw = self.quant_resi[si/(SN-1)](h_BChw)  # 当前尺度信息量对完整图像的猜测 latent
+            f_hat.add_(h_BChw)  # 不同尺度的 latent 的相加
+            f_rest.sub_(h_BChw)  # 还剩多少信息需要编码
             f_hat_or_idx_Bl.append(f_hat.clone() if to_fhat else idx_N.reshape(B, ph*pw))
-        
+        #  f_hat:reconstruction result: latent to be decoded;  idx_Bl:embedding index of each scale  [B, dk^2]*K
         return f_hat_or_idx_Bl
     
     # ===================== idxBl_to_var_input: only used in VAR training, for getting teacher-forcing input =====================
@@ -177,10 +177,15 @@ class VectorQuantizer2(nn.Module):
         pn_next: int = self.v_patch_nums[0]
         for si in range(SN-1):
             if self.prog_si == 0 or (0 <= self.prog_si-1 < si): break   # progressive training: not supported yet, prog_si always -1
+            # 标准化为相同尺寸 16x16 的 latent
             h_BChw = F.interpolate(self.embedding(gt_ms_idx_Bl[si]).transpose_(1, 2).view(B, C, pn_next, pn_next), size=(H, W), mode='bicubic')
+            # 通过这个卷积去预测下一个更加精细的 scale 的 latent，用卷积增加信息量
             f_hat.add_(self.quant_resi[si/(SN-1)](h_BChw))
             pn_next = self.v_patch_nums[si+1]
-            next_scales.append(F.interpolate(f_hat, size=(pn_next, pn_next), mode='area').view(B, C, -1).transpose(1, 2))
+            # next_scales是论文中的e,(num(ek)=num(rk+1)) 包含了之前所有 scale 的信息量（不只是当前scale的信息量），
+            # 作为预测下一个 scale 的输入，LLM负责拟合
+            next_scales.append(F.interpolate(f_hat, size=(pn_next, pn_next), mode='area').view(B, C, -1).transpose(1, 2)) # regressive between scales
+        # [B,sum(dk^2),C]
         return torch.cat(next_scales, dim=1) if len(next_scales) else None    # cat BlCs to BLC, this should be float32
     
     # ===================== get_next_autoregressive_input: only used in VAR inference, for getting next step's input =====================
