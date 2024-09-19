@@ -179,11 +179,10 @@ class VectorQuantizer2(nn.Module):
             if self.prog_si == 0 or (0 <= self.prog_si-1 < si): break   # progressive training: not supported yet, prog_si always -1
             # 标准化为相同尺寸 16x16 的 latent
             h_BChw = F.interpolate(self.embedding(gt_ms_idx_Bl[si]).transpose_(1, 2).view(B, C, pn_next, pn_next), size=(H, W), mode='bicubic')
-            # 通过这个卷积去预测下一个更加精细的 scale 的 latent，用卷积增加信息量
+            # 加上本尺度对完整图像的猜测
             f_hat.add_(self.quant_resi[si/(SN-1)](h_BChw))
             pn_next = self.v_patch_nums[si+1]
-            # next_scales是论文中的e,(num(ek)=num(rk+1)) 包含了之前所有 scale 的信息量（不只是当前scale的信息量），
-            # 作为预测下一个 scale 的输入，LLM负责拟合
+            # 先将已有信息 f_hat (16,16)缩放到下一尺度(pn_next,pn_next), 再用已有信息预测下一尺度的 latent
             next_scales.append(F.interpolate(f_hat, size=(pn_next, pn_next), mode='area').view(B, C, -1).transpose(1, 2)) # regressive between scales
         # [B,sum(dk^2),C]
         return torch.cat(next_scales, dim=1) if len(next_scales) else None    # cat BlCs to BLC, this should be float32

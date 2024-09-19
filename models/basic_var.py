@@ -104,7 +104,7 @@ class SelfAttention(nn.Module):
             q = F.normalize(q, dim=-1).mul(scale_mul)
             k = F.normalize(k, dim=-1)
         
-        if self.caching:
+        if self.caching: # 将新的kv拼接到cached_k和cached_v上，cached_k和cached_v的shape为[B, H, L, C],L是之前所有尺度的展开长度之和
             if self.cached_k is None: self.cached_k = k; self.cached_v = v
             else: k = self.cached_k = torch.cat((self.cached_k, k), dim=dim_cat); v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
         

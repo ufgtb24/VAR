@@ -163,10 +163,10 @@ class VAR(nn.Module):
             cur_L += pn*pn
             # assert self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].sum() == 0, f'AR with {(self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L] != 0).sum()} / {self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].numel()} mask item'
             cond_BD_or_gss = self.shared_ada_lin(cond_BD)
-            x = next_token_map
+            x = next_token_map  # 因为使用的 kv_cache 所以每次只需要计算新的 token_map
             AdaLNSelfAttn.forward
             for b in self.blocks:
-                x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
+                x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None) #
             logits_BlV = self.get_logits(x, cond_BD)
             
             t = cfg * ratio
@@ -174,19 +174,21 @@ class VAR(nn.Module):
             
             idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
             if not more_smooth: # this is the default case
+                # 获根据 idx_Bl 在 vae 的 embedding （通过quant训练得到）中查找对应的 h_BChw，作为取当前尺度的 latent
                 h_BChw = self.vae_quant_proxy[0].embedding(idx_Bl)   # B, l, Cvae
             else:   # not used when evaluating FID/IS/Precision/Recall
                 gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)   # refer to mask-git
                 h_BChw = gumbel_softmax_with_rng(logits_BlV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=rng) @ self.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
             
             h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, pn, pn)
+            # 将 h_BChw 融合进 f_hat，并根据 f_hat 生成下一个 token_map，token_map 是LLM预测下一尺度的输入
             f_hat, next_token_map = self.vae_quant_proxy[0].get_next_autoregressive_input(si, len(self.patch_nums), f_hat, h_BChw)
             if si != self.num_stages_minus_1:   # prepare for next stage
                 next_token_map = next_token_map.view(B, self.Cvae, -1).transpose(1, 2)
                 next_token_map = self.word_embed(next_token_map) + lvl_pos[:, cur_L:cur_L + self.patch_nums[si+1] ** 2]
                 next_token_map = next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
         
-        for b in self.blocks: b.attn.kv_caching(False)
+        for b in self.blocks: b.attn.kv_caching(False) # 重置缓存
         return self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
     
     def forward(self, label_B: torch.LongTensor, x_BLCv_wo_first_l: torch.Tensor) -> torch.Tensor:  # returns logits_BLV
@@ -220,7 +222,7 @@ class VAR(nn.Module):
         AdaLNSelfAttn.forward
         for i, b in enumerate(self.blocks):
             x_BLC = b(x=x_BLC, cond_BD=cond_BD_or_gss, attn_bias=attn_bias)
-        x_BLC = self.get_logits(x_BLC.float(), cond_BD)
+        x_BLC = self.get_logits(x_BLC.float(), cond_BD) # x_BLC shape: [B, L, vocab_size]
         
         if self.prog_si == 0:
             if isinstance(self.word_embed, nn.Linear):
